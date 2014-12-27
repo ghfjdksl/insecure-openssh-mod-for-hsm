@@ -77,6 +77,7 @@
 #include "log.h"
 #include "misc.h"
 #include "digest.h"
+#include "hsm.h"
 
 #ifdef ENABLE_PKCS11
 #include "ssh-pkcs11.h"
@@ -216,29 +217,19 @@ confirm_key(Identity *id)
 static void
 process_request_identities(SocketEntry *e, int version)
 {
-	Idtab *tab = idtab_lookup(version);
-	Identity *id;
 	Buffer msg;
 
 	buffer_init(&msg);
 	buffer_put_char(&msg, (version == 1) ?
 	    SSH_AGENT_RSA_IDENTITIES_ANSWER : SSH2_AGENT_IDENTITIES_ANSWER);
-	buffer_put_int(&msg, tab->nentries);
-	TAILQ_FOREACH(id, &tab->idlist, next) {
-		if (id->key->type == KEY_RSA1) {
-#ifdef WITH_SSH1
-			buffer_put_int(&msg, BN_num_bits(id->key->rsa->n));
-			buffer_put_bignum(&msg, id->key->rsa->e);
-			buffer_put_bignum(&msg, id->key->rsa->n);
-#endif
-		} else {
-			u_char *blob;
-			u_int blen;
-			key_to_blob(id->key, &blob, &blen);
-			buffer_put_string(&msg, blob, blen);
-			free(blob);
-		}
-		buffer_put_cstring(&msg, id->comment);
+	{
+		u_char *blob;
+		u_int blen;
+		hsm_rsa2048_getpubkey(&blob, &blen);
+		buffer_put_int(&msg, 1);
+		buffer_put_string(&msg, blob, blen);
+		buffer_put_cstring(&msg, "rsa w/o comment");
+		free(blob);
 	}
 	buffer_put_int(&e->output, buffer_len(&msg));
 	buffer_append(&e->output, buffer_ptr(&msg), buffer_len(&msg));
@@ -328,7 +319,6 @@ process_sign_request2(SocketEntry *e)
 	int odatafellows;
 	int ok = -1, flags;
 	Buffer msg;
-	Key *key;
 
 	datafellows = 0;
 
@@ -340,13 +330,7 @@ process_sign_request2(SocketEntry *e)
 	if (flags & SSH_AGENT_OLD_SIGNATURE)
 		datafellows = SSH_BUG_SIGBLOB;
 
-	key = key_from_blob(blob, blen);
-	if (key != NULL) {
-		Identity *id = lookup_identity(key, 2);
-		if (id != NULL && (!id->confirm || confirm_key(id) == 0))
-			ok = key_sign(id->key, &signature, &slen, data, dlen);
-		key_free(key);
-	}
+	ok = hsm_rsa2048_sign(&signature, &slen, blob, blen, data, dlen);
 	buffer_init(&msg);
 	if (ok == 0) {
 		buffer_put_char(&msg, SSH2_AGENT_SIGN_RESPONSE);
